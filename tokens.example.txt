@@ -1,0 +1,7 @@
+# Paste your real auth_tokens into a new file named 'tokens.txt' (one per line)
+# Or in cloud deployments (e.g. Render), set the X_TOKENS environment variable.
+# Format: auth_token OR auth_token:ct0
+
+# Example:
+# 1234567890abcdef1234567890abcdef12345678
+# 9876543210fedcba9876543210fedcba98765432:abcdef1234567890

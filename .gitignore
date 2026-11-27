@@ -1,0 +1,11 @@
+# Secret Tokens & Configs (NEVER COMMIT)
+tokens.txt
+telegram_config.json
+
+# Cache & temporary files
+__pycache__/
+*.pyc
+debug_screenshots/*.png
+.env
+.DS_Store
+Thumbs.db
