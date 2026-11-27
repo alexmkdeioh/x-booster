@@ -521,8 +521,12 @@ async def main():
         browser = await p.chromium.launch(
             headless=True,
             args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
                 "--autoplay-policy=no-user-gesture-required",
-                "--disable-blink-features=AutomationControlled"
+                "--disable-blink-features=AutomationControlled",
+                "--disable-gpu"
             ]
         )
 

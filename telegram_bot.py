@@ -1,7 +1,7 @@
 """
 Telegram Remote Controller for X (Twitter) Multi-Account Suite
 Control your bots from anywhere in the world from your phone via Telegram!
-Compatible with Render.com Free Web Service and local environments.
+Compatible with Render.com Free Web Service, Docker, and local environments.
 Includes automated Self-Ping Keep-Awake Engine and Interactive Buttons.
 """
 
@@ -11,17 +11,26 @@ import json
 import asyncio
 import aiohttp
 from aiohttp import web
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters
 )
 
 import space_listener_browser_bot as bot_engine
 from playwright.async_api import async_playwright
+
+# Ensure UTF-8 output
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "telegram_config.json")
 DEBUG_DIR = os.path.join(os.path.dirname(__file__), "debug_screenshots")
@@ -32,7 +41,7 @@ current_space_task = None
 current_space_browser = None
 keep_awake_task = None
 configured_awake_url = None
-user_state = {}  # Tracks conversation states like waiting for tweet URL
+user_state = {}
 
 def get_main_keyboard():
     keyboard = [
@@ -74,7 +83,7 @@ async def health_check(request):
 async def keep_awake_loop():
     """Continuously pings the web service every 9 minutes to prevent Render free tier from sleeping."""
     global configured_awake_url
-    await asyncio.sleep(10)  # wait for web server to start up
+    await asyncio.sleep(10)
 
     while True:
         target_url = configured_awake_url or os.environ.get("RENDER_EXTERNAL_URL")
@@ -92,7 +101,6 @@ async def keep_awake_loop():
         else:
             print("[*] [Keep-Awake] Waiting for URL (not set yet or running locally).")
 
-        # Sleep for 9 minutes (540 seconds) - Render sleeps at 15 minutes
         await asyncio.sleep(540)
 
 async def start_web_server(app):
@@ -113,7 +121,6 @@ async def start_web_server(app):
     await site.start()
     print(f"[*] Health web server started on port {port} (Render ready!)")
 
-    # Start the keep-awake loop in background
     global keep_awake_task
     keep_awake_task = asyncio.create_task(keep_awake_loop())
 
@@ -137,8 +144,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 *Welcome to X Multi-Account Remote Controller!*\n\n"
         f"📊 *Connected Accounts:* `{len(tokens)}`\n"
         f"🌐 *Host Status:* `{awake_url}`\n\n"
-        f"⚡ *Use the buttons below to control your accounts:* 👇\n\n"
-        f"❤️ `Like Tweet` - Like any tweet\n"
+        f"⚡ *How to use:*\n"
+        f"• Tap any button below, OR\n"
+        f"• Just paste any Tweet / Space link directly into this chat!\n\n"
+        f"❤️ `Like Tweet` - Like a tweet with all accounts\n"
         f"💬 `Like & Comment` - Like & comment on tweet\n"
         f"🎙️ `Space Booster` - Join Twitter Space as listener\n"
         f"🛑 `Stop Space` - Disconnect from Space\n"
@@ -148,13 +157,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 async def awake_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Awake button / command handler."""
     if not is_authorized(update.effective_user.id):
         return
 
     global configured_awake_url
-
-    # Check if user passed a custom URL (e.g. /awake https://myapp.onrender.com)
     if context.args:
         custom_url = context.args[0].strip()
         configured_awake_url = custom_url
@@ -173,7 +179,6 @@ async def awake_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=get_main_keyboard())
         return
 
-    # Trigger an immediate test ping
     ping_url = target_url.rstrip("/") + "/health"
     ping_status = "Unknown"
     latency = 0
@@ -208,11 +213,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_space_task
 
     is_space_running = current_space_task is not None and not current_space_task.done()
-    target_url = configured_awake_url or os.environ.get("RENDER_EXTERNAL_URL", "Local PC (Active)")
+    target_url = configured_awake_url or os.environ.get("RENDER_EXTERNAL_URL", "Local PC Mode")
+
+    token_status = f"`{len(tokens)} account(s) ready`" if tokens else "⚠️ *0 accounts found!* (Add `X_TOKENS` in Render Environment Variables or check `tokens.txt`)"
 
     msg = (
         f"📊 *Bot Status Overview*\n\n"
-        f"🔑 *Loaded Accounts:* `{len(tokens)}`\n"
+        f"🔑 *Accounts:* {token_status}\n"
         f"📝 *Comments in File:* `{len(comments)}`\n"
         f"🎙️ *Space Listener Active:* `{'Yes (Running)' if is_space_running else 'No (Idle)'}`\n"
         f"⚡ *Host / Keep-Awake:* `{target_url}`\n"
@@ -223,6 +230,18 @@ async def run_engagement_task(chat_id, bot, mode, target_url, custom_comment=Non
     tokens = bot_engine.get_tokens()
     file_comments = bot_engine.get_comments()
 
+    if not tokens:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "⚠️ *No accounts found!*\n\n"
+                "• *If on Render:* Go to Render Dashboard $\\rightarrow$ Environment Variables $\\rightarrow$ Add `X_TOKENS` with your tokens.\n"
+                "• *If on PC:* Make sure `tokens.txt` contains your tokens."
+            ),
+            parse_mode="Markdown"
+        )
+        return
+
     mode_name = "Like" if mode == 1 else "Like & Comment"
     await bot.send_message(
         chat_id=chat_id,
@@ -230,43 +249,57 @@ async def run_engagement_task(chat_id, bot, mode, target_url, custom_comment=Non
         parse_mode="Markdown"
     )
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--autoplay-policy=no-user-gesture-required",
-                "--disable-blink-features=AutomationControlled"
-            ]
-        )
-
-        tasks = []
-        for i, token in enumerate(tokens, 1):
-            if custom_comment:
-                comment_text = custom_comment
-            else:
-                comment_text = file_comments[(i - 1) % len(file_comments)]
-
-            tasks.append(
-                bot_engine.run_account_session(browser, token, target_url, mode, comment_text, i)
+    try:
+        async with async_playwright() as p:
+            # Full Docker & Linux compatible browser arguments
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--autoplay-policy=no-user-gesture-required",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-gpu"
+                ]
             )
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        await browser.close()
+            tasks = []
+            for i, token in enumerate(tokens, 1):
+                if custom_comment:
+                    comment_text = custom_comment
+                else:
+                    comment_text = file_comments[(i - 1) % len(file_comments)]
 
-    success_count = sum(1 for r in results if r is True)
-    await bot.send_message(
-        chat_id=chat_id,
-        text=f"✅ *{mode_name} Finished!*\n\n🎉 Successfully completed for *{success_count}/{len(tokens)}* accounts.",
-        parse_mode="Markdown"
-    )
+                tasks.append(
+                    bot_engine.run_account_session(browser, token, target_url, mode, comment_text, i)
+                )
 
-    first_screenshot = os.path.join(DEBUG_DIR, "account_1_result.png")
-    if os.path.exists(first_screenshot):
-        try:
-            with open(first_screenshot, "rb") as photo:
-                await bot.send_photo(chat_id=chat_id, photo=photo, caption="📸 Proof from Account #1")
-        except Exception as e:
-            print(f"Could not send photo: {e}")
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            await browser.close()
+
+        success_count = sum(1 for r in results if r is True)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ *{mode_name} Finished!*\n\n🎉 Successfully completed for *{success_count}/{len(tokens)}* accounts.",
+            parse_mode="Markdown"
+        )
+
+        first_screenshot = os.path.join(DEBUG_DIR, "account_1_result.png")
+        if os.path.exists(first_screenshot):
+            try:
+                with open(first_screenshot, "rb") as photo:
+                    await bot.send_photo(chat_id=chat_id, photo=photo, caption="📸 Proof from Account #1")
+            except Exception as e:
+                print(f"Could not send photo: {e}")
+
+    except Exception as e:
+        print(f"[!] Engagement task error: {e}")
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ *Error during {mode_name}:*\n`{e}`",
+            parse_mode="Markdown"
+        )
 
 async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
@@ -278,16 +311,6 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     tweet_url = context.args[0].strip()
-    tokens = bot_engine.get_tokens()
-    if not tokens:
-        await update.message.reply_text(
-            "❌ *No accounts found!*\n\n"
-            "• On your PC: Make sure `tokens.txt` has your tokens.\n"
-            "• On Render: Go to Environment Variables and add `X_TOKENS` with your tokens.",
-            parse_mode="Markdown"
-        )
-        return
-
     asyncio.create_task(run_engagement_task(update.effective_chat.id, context.bot, mode=1, target_url=tweet_url))
 
 async def comment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -305,16 +328,6 @@ async def comment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tweet_url = context.args[0].strip()
     custom_comment = " ".join(context.args[1:]).strip() if len(context.args) > 1 else None
 
-    tokens = bot_engine.get_tokens()
-    if not tokens:
-        await update.message.reply_text(
-            "❌ *No accounts found!*\n\n"
-            "• On your PC: Make sure `tokens.txt` has your tokens.\n"
-            "• On Render: Go to Environment Variables and add `X_TOKENS` with your tokens.",
-            parse_mode="Markdown"
-        )
-        return
-
     asyncio.create_task(
         run_engagement_task(update.effective_chat.id, context.bot, mode=2, target_url=tweet_url, custom_comment=custom_comment)
     )
@@ -323,43 +336,59 @@ async def run_space_session(chat_id, bot, space_url):
     global current_space_browser
     tokens = bot_engine.get_tokens()
 
+    if not tokens:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ *No accounts found!* Please set `X_TOKENS` on Render or check `tokens.txt`.",
+            parse_mode="Markdown"
+        )
+        return
+
     await bot.send_message(
         chat_id=chat_id,
         text=f"🎙️ *Joining Space with {len(tokens)} accounts...*\n\n🔗 `{space_url}`",
         parse_mode="Markdown"
     )
 
-    async with async_playwright() as p:
-        current_space_browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--autoplay-policy=no-user-gesture-required",
-                "--disable-blink-features=AutomationControlled"
+    try:
+        async with async_playwright() as p:
+            current_space_browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--autoplay-policy=no-user-gesture-required",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-gpu"
+                ]
+            )
+
+            tasks = [
+                bot_engine.run_account_session(current_space_browser, token, space_url, 3, "", i)
+                for i, token in enumerate(tokens, 1)
             ]
-        )
 
-        tasks = [
-            bot_engine.run_account_session(current_space_browser, token, space_url, 3, "", i)
-            for i, token in enumerate(tokens, 1)
-        ]
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ *All {len(tokens)} accounts dispatched!*\nMaintaining presence in Space. Tap `🛑 Stop Space` when you want them to leave.",
+                parse_mode="Markdown"
+            )
 
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"✅ *All {len(tokens)} accounts dispatched!*\nMaintaining presence in Space. Tap `🛑 Stop Space` when you want them to leave.",
-            parse_mode="Markdown"
-        )
-
-        try:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if current_space_browser:
-                try:
-                    await current_space_browser.close()
-                except Exception:
-                    pass
-                current_space_browser = None
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                if current_space_browser:
+                    try:
+                        await current_space_browser.close()
+                    except Exception:
+                        pass
+                    current_space_browser = None
+    except Exception as e:
+        print(f"[!] Space session error: {e}")
+        await bot.send_message(chat_id=chat_id, text=f"❌ *Error in Space Booster:* `{e}`", parse_mode="Markdown")
 
 async def space_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_space_task
@@ -396,15 +425,38 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("ℹ️ No active Space session is running.")
 
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles inline button clicks on detected links."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data.startswith("like:"):
+        url = data.split("like:", 1)[1]
+        await query.edit_message_text(f"❤️ *Starting Like on:* `{url}`", parse_mode="Markdown")
+        asyncio.create_task(run_engagement_task(query.message.chat_id, context.bot, mode=1, target_url=url))
+    elif data.startswith("comment:"):
+        url = data.split("comment:", 1)[1]
+        await query.edit_message_text(f"💬 *Starting Like & Comment on:* `{url}`", parse_mode="Markdown")
+        asyncio.create_task(run_engagement_task(query.message.chat_id, context.bot, mode=2, target_url=url))
+    elif data.startswith("space:"):
+        url = data.split("space:", 1)[1]
+        await query.edit_message_text(f"🎙️ *Joining Space:* `{url}`", parse_mode="Markdown")
+        global current_space_task
+        if current_space_task and not current_space_task.done():
+            await context.bot.send_message(query.message.chat_id, "⚠️ Space already active. Send `/stop` first.")
+            return
+        current_space_task = asyncio.create_task(run_space_session(query.message.chat_id, context.bot, url))
+
 async def handle_button_or_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles text messages and button clicks from the custom keyboard."""
+    """Handles text messages, URLs, and custom keyboard buttons."""
     if not is_authorized(update.effective_user.id):
         return
 
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # Handle button taps
+    # 1. Handle keyboard buttons
     if text == "❤️ Like Tweet":
         user_state[user_id] = "waiting_for_like_url"
         await update.message.reply_text("❤️ *Send the Tweet URL you want to like:*", parse_mode="Markdown")
@@ -430,20 +482,11 @@ async def handle_button_or_text(update: Update, context: ContextTypes.DEFAULT_TY
         await status_command(update, context)
         return
 
-    # Handle input following a button prompt
+    # 2. Check if user is responding to a prompt
     current_action = user_state.get(user_id)
     if current_action == "waiting_for_like_url":
         user_state[user_id] = None
         tweet_url = text.split()[0]
-        tokens = bot_engine.get_tokens()
-        if not tokens:
-            await update.message.reply_text(
-                "❌ *No accounts found!*\n\n"
-                "• On your PC: Make sure `tokens.txt` has your tokens.\n"
-                "• On Render: Go to Environment Variables and add `X_TOKENS` with your tokens.",
-                parse_mode="Markdown"
-            )
-            return
         asyncio.create_task(run_engagement_task(update.effective_chat.id, context.bot, mode=1, target_url=tweet_url))
         return
 
@@ -452,15 +495,6 @@ async def handle_button_or_text(update: Update, context: ContextTypes.DEFAULT_TY
         parts = text.split(maxsplit=1)
         tweet_url = parts[0]
         custom_comment = parts[1] if len(parts) > 1 else None
-        tokens = bot_engine.get_tokens()
-        if not tokens:
-            await update.message.reply_text(
-                "❌ *No accounts found!*\n\n"
-                "• On your PC: Make sure `tokens.txt` has your tokens.\n"
-                "• On Render: Go to Environment Variables and add `X_TOKENS` with your tokens.",
-                parse_mode="Markdown"
-            )
-            return
         asyncio.create_task(run_engagement_task(update.effective_chat.id, context.bot, mode=2, target_url=tweet_url, custom_comment=custom_comment))
         return
 
@@ -474,8 +508,27 @@ async def handle_button_or_text(update: Update, context: ContextTypes.DEFAULT_TY
         current_space_task = asyncio.create_task(run_space_session(update.effective_chat.id, context.bot, space_url))
         return
 
-    # Fallback response with keyboard
-    await update.message.reply_text("👇 Choose an action below or send a command:", reply_markup=get_main_keyboard())
+    # 3. Direct Link Detection (User just pastes a link into chat!)
+    if "x.com" in text or "twitter.com" in text:
+        first_url = [w for w in text.split() if "x.com" in w or "twitter.com" in w][0]
+        if "/i/spaces/" in first_url:
+            inline_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎙️ Join Space as Listener", callback_data=f"space:{first_url}")]
+            ])
+            await update.message.reply_text(f"🎙️ *Space detected! Tap below to join:*", parse_mode="Markdown", reply_markup=inline_kb)
+            return
+        else:
+            inline_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("❤️ Like Tweet", callback_data=f"like:{first_url}"),
+                    InlineKeyboardButton("💬 Like & Comment", callback_data=f"comment:{first_url}")
+                ]
+            ])
+            await update.message.reply_text(f"🎯 *Tweet link detected! Choose action:*", parse_mode="Markdown", reply_markup=inline_kb)
+            return
+
+    # 4. Fallback welcome menu
+    await update.message.reply_text("👇 Choose an action below or paste a Twitter link directly into this chat:", reply_markup=get_main_keyboard())
 
 def main():
     cfg = load_config()
@@ -485,19 +538,9 @@ def main():
         print("\n" + "=" * 65)
         print(" [!] TELEGRAM BOT TOKEN REQUIRED")
         print("=" * 65)
-        print(" 1. Open Telegram and search for @BotFather")
-        print(" 2. Send '/newbot' and choose a name and username for your bot")
-        print(" 3. Copy the HTTP API token BotFather gives you")
-        print(" 4. Paste it into 'telegram_config.json' or set TELEGRAM_BOT_TOKEN env variable!")
+        print(" Please set TELEGRAM_BOT_TOKEN in Render or telegram_config.json.")
         print("=" * 65 + "\n")
-        token_input = input("Or paste your Telegram Bot Token here now: ").strip()
-        if token_input:
-            cfg["telegram_bot_token"] = token_input
-            save_config(cfg)
-            token = token_input
-        else:
-            print("[-] Exiting. Please configure telegram_config.json.")
-            return
+        return
 
     print("=" * 65)
     print("      TELEGRAM BOT CONTROLLER IS RUNNING ONLINE")
@@ -515,7 +558,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("awake", awake_command))
 
-    # Message handler for keyboard buttons and conversational inputs
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button_or_text))
 
     app.run_polling()
