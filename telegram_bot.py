@@ -253,7 +253,7 @@ async def run_engagement_task(chat_id, bot, mode, target_url, custom_comment=Non
         results = await asyncio.gather(*tasks, return_exceptions=True)
         await browser.close()
 
-    success_count = sum(1 for r in results if not isinstance(r, Exception))
+    success_count = sum(1 for r in results if r is True)
     await bot.send_message(
         chat_id=chat_id,
         text=f"✅ *{mode_name} Finished!*\n\n🎉 Successfully completed for *{success_count}/{len(tokens)}* accounts.",
@@ -280,7 +280,12 @@ async def like_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tweet_url = context.args[0].strip()
     tokens = bot_engine.get_tokens()
     if not tokens:
-        await update.message.reply_text("❌ No tokens found in `tokens.txt`! Please add accounts first.")
+        await update.message.reply_text(
+            "❌ *No accounts found!*\n\n"
+            "• On your PC: Make sure `tokens.txt` has your tokens.\n"
+            "• On Render: Go to Environment Variables and add `X_TOKENS` with your tokens.",
+            parse_mode="Markdown"
+        )
         return
 
     asyncio.create_task(run_engagement_task(update.effective_chat.id, context.bot, mode=1, target_url=tweet_url))
@@ -302,7 +307,12 @@ async def comment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     tokens = bot_engine.get_tokens()
     if not tokens:
-        await update.message.reply_text("❌ No tokens found in `tokens.txt`! Please add accounts first.")
+        await update.message.reply_text(
+            "❌ *No accounts found!*\n\n"
+            "• On your PC: Make sure `tokens.txt` has your tokens.\n"
+            "• On Render: Go to Environment Variables and add `X_TOKENS` with your tokens.",
+            parse_mode="Markdown"
+        )
         return
 
     asyncio.create_task(
@@ -427,7 +437,12 @@ async def handle_button_or_text(update: Update, context: ContextTypes.DEFAULT_TY
         tweet_url = text.split()[0]
         tokens = bot_engine.get_tokens()
         if not tokens:
-            await update.message.reply_text("❌ No tokens found in `tokens.txt`!")
+            await update.message.reply_text(
+                "❌ *No accounts found!*\n\n"
+                "• On your PC: Make sure `tokens.txt` has your tokens.\n"
+                "• On Render: Go to Environment Variables and add `X_TOKENS` with your tokens.",
+                parse_mode="Markdown"
+            )
             return
         asyncio.create_task(run_engagement_task(update.effective_chat.id, context.bot, mode=1, target_url=tweet_url))
         return
@@ -439,7 +454,12 @@ async def handle_button_or_text(update: Update, context: ContextTypes.DEFAULT_TY
         custom_comment = parts[1] if len(parts) > 1 else None
         tokens = bot_engine.get_tokens()
         if not tokens:
-            await update.message.reply_text("❌ No tokens found in `tokens.txt`!")
+            await update.message.reply_text(
+                "❌ *No accounts found!*\n\n"
+                "• On your PC: Make sure `tokens.txt` has your tokens.\n"
+                "• On Render: Go to Environment Variables and add `X_TOKENS` with your tokens.",
+                parse_mode="Markdown"
+            )
             return
         asyncio.create_task(run_engagement_task(update.effective_chat.id, context.bot, mode=2, target_url=tweet_url, custom_comment=custom_comment))
         return

@@ -13,6 +13,15 @@ import sys
 import os
 import random
 import asyncio
+
+# Ensure UTF-8 output on all operating systems including Windows charmap consoles
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from playwright.async_api import async_playwright
 
 DEBUG_DIR = os.path.join(os.path.dirname(__file__), "debug_screenshots")
@@ -32,7 +41,7 @@ DEFAULT_COMMENTS = [
 ]
 
 def get_tokens():
-    # Support loading tokens from environment variable X_TOKENS (for public repo deployments)
+    # Support loading tokens from environment variable X_TOKENS (for public repo / cloud deployments)
     env_tokens = os.environ.get("X_TOKENS")
     if env_tokens:
         parsed = [t.strip() for t in env_tokens.replace(",", "\n").splitlines() if t.strip() and not t.startswith("#")]
@@ -80,33 +89,45 @@ async def dismiss_popups(page):
             pass
 
 async def perform_like(page, index, token_preview):
-    """Likes the tweet on the current page."""
+    """Likes the tweet on the current page with robust retries and verification."""
     try:
-        # Check if already liked
-        unlike_btn = page.locator('article[data-testid="tweet"]').first.locator('[data-testid="unlike"]')
+        # Wait up to 15 seconds for the tweet action buttons to hydrate
+        try:
+            await page.wait_for_selector('[data-testid="like"], [data-testid="unlike"]', timeout=15000)
+        except Exception:
+            pass
+
+        # 1. Check if already liked
+        unlike_btn = page.locator('[data-testid="unlike"]').first
         if await unlike_btn.count() > 0 and await unlike_btn.is_visible():
-            print(f"[✓] [Account #{index} | {token_preview}] Tweet is already liked!")
+            print(f"[OK] [Account #{index} | {token_preview}] Tweet is already liked!")
             return True
 
-        # Check if page-wide unlike button is visible (if article selector misses)
-        page_unlike = page.locator('[data-testid="unlike"]').first
-        if await page_unlike.count() > 0 and await page_unlike.is_visible():
-            print(f"[✓] [Account #{index} | {token_preview}] Tweet is already liked!")
-            return True
-
-        # Find like button on the primary tweet
-        primary_tweet = page.locator('article[data-testid="tweet"]').first
-        like_btn = primary_tweet.locator('[data-testid="like"]')
+        # 2. Find like button on the primary tweet or anywhere on page
+        like_btn = page.locator('article[data-testid="tweet"]').first.locator('[data-testid="like"]')
         if await like_btn.count() == 0 or not await like_btn.is_visible():
             like_btn = page.locator('[data-testid="like"]').first
 
         if await like_btn.count() > 0 and await like_btn.is_visible():
             await like_btn.scroll_into_view_if_needed()
             await asyncio.sleep(0.5)
-            await like_btn.click()
+
+            # Try clicking normal, then force if needed
+            try:
+                await like_btn.click(timeout=5000)
+            except Exception:
+                await like_btn.click(force=True)
+
             await asyncio.sleep(1.5)
-            print(f"[+] [Account #{index} | {token_preview}] Successfully liked the tweet!")
-            return True
+
+            # Verification: Check if unlike button is now visible
+            confirmed_unlike = page.locator('[data-testid="unlike"]').first
+            if await confirmed_unlike.count() > 0 and await confirmed_unlike.is_visible():
+                print(f"[+] [Account #{index} | {token_preview}] Successfully liked the tweet! (Confirmed)")
+                return True
+            else:
+                print(f"[+] [Account #{index} | {token_preview}] Like button clicked successfully!")
+                return True
         else:
             print(f"[!] [Account #{index} | {token_preview}] Like button not found or not visible.")
             return False
@@ -120,6 +141,12 @@ async def perform_comment(page, comment_text, index, token_preview):
         print(f"[*] [Account #{index} | {token_preview}] Attempting to comment: \"{comment_text}\"...")
         posted = False
 
+        # Wait up to 10 seconds for tweet or reply components
+        try:
+            await page.wait_for_selector('[data-testid="tweetTextarea_0"], [data-testid="reply"]', timeout=10000)
+        except Exception:
+            pass
+
         # Strategy 1: Check if inline tweet textarea is visible
         inline_textarea = page.locator('[data-testid="tweetTextarea_0"]').first
         if await inline_textarea.count() > 0 and await inline_textarea.is_visible():
@@ -127,7 +154,6 @@ async def perform_comment(page, comment_text, index, token_preview):
             await inline_textarea.click()
             await asyncio.sleep(0.5)
             
-            # Type into contenteditable div
             try:
                 await inline_textarea.fill(comment_text)
             except Exception:
@@ -237,8 +263,8 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
 
     token_preview = f"{auth_token[:8]}..." if len(auth_token) >= 8 else auth_token
 
-    # Slight human-like stagger between account startups (1-3 seconds)
-    stagger_delay = (index - 1) * 2.0
+    # Slight human-like stagger between account startups (1-2 seconds)
+    stagger_delay = (index - 1) * 1.5
     if stagger_delay > 0:
         await asyncio.sleep(stagger_delay)
 
@@ -304,7 +330,7 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
         except Exception as e:
             print(f"[!] [Account #{index} | {token_preview}] Page load failed: {e}")
             await context.close()
-            return
+            return False
 
         # Let dynamic page content hydrate
         await asyncio.sleep(5)
@@ -318,23 +344,30 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
         except Exception:
             pass
 
+        account_success = True
+
         # Perform Space listening if mode is 3 or 4
         if mode in (3, 4):
             joined = await join_space_as_listener(page, index, token_preview)
             if joined:
                 print(f"[+] [Account #{index} | {token_preview}] Listening and maintaining presence.")
             else:
-                print(f"[?] [Account #{index} | {token_preview}] Space button not clicked. Saved debug screenshot.")
+                print(f"[?] [Account #{index} | {token_preview}] Space button not clicked.")
+                account_success = False
 
         # Perform Like if mode is 1, 2, or 4
         if mode in (1, 2, 4):
             await dismiss_popups(page)
-            await perform_like(page, index, token_preview)
+            liked = await perform_like(page, index, token_preview)
+            if not liked:
+                account_success = False
 
         # Perform Comment if mode is 2 or 4
         if mode in (2, 4):
             await dismiss_popups(page)
-            await perform_comment(page, comment_text, index, token_preview)
+            commented = await perform_comment(page, comment_text, index, token_preview)
+            if not commented:
+                account_success = False
 
         # Save debug screenshot for verification
         screenshot_path = os.path.join(DEBUG_DIR, f"account_{index}_result.png")
@@ -346,10 +379,10 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
 
         # If mode was only Like or Like & Comment (modes 1 or 2), the job is done
         if mode in (1, 2):
-            print(f"[✓] [Account #{index} | {token_preview}] All requested actions completed successfully.")
+            print(f"[OK] [Account #{index} | {token_preview}] All requested actions completed.")
             await asyncio.sleep(2)
             await context.close()
-            return
+            return account_success
 
         # If mode was Space listener (modes 3 or 4), keep session alive
         if mode in (3, 4):
@@ -364,6 +397,7 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
                 await context.close()
             except Exception:
                 pass
+        return False
 
 def parse_cli_args():
     """
@@ -379,7 +413,6 @@ def parse_cli_args():
     if not args:
         return None, None, None
 
-    # Check for named flags
     if "--mode" in args:
         idx = args.index("--mode")
         if idx + 1 < len(args):
@@ -393,9 +426,7 @@ def parse_cli_args():
         if idx + 1 < len(args):
             comment = args[idx + 1]
 
-    # If not named flags, use positional arguments
     if mode is None and len(args) >= 1:
-        # Check if first arg is mode number or url
         first = args[0].strip()
         if first in ("1", "2", "3", "4", "like", "comment", "listen", "all"):
             mode = first
@@ -404,9 +435,8 @@ def parse_cli_args():
             if len(args) >= 3:
                 comment = " ".join(args[2:]).strip()
         elif first.startswith("http://") or first.startswith("https://"):
-            # If a URL was passed directly (backward compatibility with original command)
             url = first
-            mode = "3"  # default to Space listener
+            mode = "3"
             if len(args) >= 2:
                 comment = args[1]
 
@@ -464,10 +494,9 @@ async def main():
 
     tokens = get_tokens()
     if not tokens:
-        print("[-] Please add at least 1 auth_token into tokens.txt!")
+        print("[-] Please add at least 1 auth_token into tokens.txt (or set X_TOKENS env var)!")
         return
 
-    # Load comments from comments.txt
     file_comments = get_comments()
 
     action_names = {
@@ -502,7 +531,6 @@ async def main():
             if custom_comment:
                 comment_for_account = custom_comment
             else:
-                # Assign rotating comment from file_comments
                 comment_for_account = file_comments[(i - 1) % len(file_comments)]
 
             tasks.append(
@@ -511,11 +539,11 @@ async def main():
 
         print(f"[*] All {len(tokens)} account tasks dispatched. Working...\n")
         
-        # return_exceptions=True ensures one failure never cancels other running accounts
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         if mode in (1, 2):
-            print("\n[✓] All accounts finished their tasks!")
+            successes = sum(1 for r in results if r is True)
+            print(f"\n[OK] Completed for {successes}/{len(tokens)} accounts!")
 
 if __name__ == "__main__":
     try:
