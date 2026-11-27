@@ -6,6 +6,7 @@ Supports:
 3. Space Listener (Presence Booster)
 4. Space Listener + Like & Comment
 
+Optimized for Low-Memory environments (e.g. Render 512MB RAM) and Local PCs.
 Fault-tolerant: if one token/account fails, it skips it and keeps all other accounts running!
 """
 
@@ -41,13 +42,14 @@ DEFAULT_COMMENTS = [
 ]
 
 def get_tokens():
-    # Support loading tokens from environment variable X_TOKENS (for public repo / cloud deployments)
+    # 1. Check environment variable X_TOKENS (for cloud deployments like Render)
     env_tokens = os.environ.get("X_TOKENS")
     if env_tokens:
         parsed = [t.strip() for t in env_tokens.replace(",", "\n").splitlines() if t.strip() and not t.startswith("#")]
         if parsed:
             return parsed
 
+    # 2. Check local tokens.txt
     tokens_file = os.path.join(os.path.dirname(__file__), "tokens.txt")
     if not os.path.exists(tokens_file):
         print("[-] tokens.txt not found and X_TOKENS env variable is not set!")
@@ -112,7 +114,6 @@ async def perform_like(page, index, token_preview):
             await like_btn.scroll_into_view_if_needed()
             await asyncio.sleep(0.5)
 
-            # Try clicking normal, then force if needed
             try:
                 await like_btn.click(timeout=5000)
             except Exception:
@@ -120,7 +121,6 @@ async def perform_like(page, index, token_preview):
 
             await asyncio.sleep(1.5)
 
-            # Verification: Check if unlike button is now visible
             confirmed_unlike = page.locator('[data-testid="unlike"]').first
             if await confirmed_unlike.count() > 0 and await confirmed_unlike.is_visible():
                 print(f"[+] [Account #{index} | {token_preview}] Successfully liked the tweet! (Confirmed)")
@@ -141,7 +141,6 @@ async def perform_comment(page, comment_text, index, token_preview):
         print(f"[*] [Account #{index} | {token_preview}] Attempting to comment: \"{comment_text}\"...")
         posted = False
 
-        # Wait up to 10 seconds for tweet or reply components
         try:
             await page.wait_for_selector('[data-testid="tweetTextarea_0"], [data-testid="reply"]', timeout=10000)
         except Exception:
@@ -169,7 +168,7 @@ async def perform_comment(page, comment_text, index, token_preview):
                 await submit_btn.click()
                 posted = True
 
-        # Strategy 2: Click the Reply icon button to open reply dialog
+        # Strategy 2: Click Reply button to open dialog
         if not posted:
             primary_tweet = page.locator('article[data-testid="tweet"]').first
             reply_btn = primary_tweet.locator('[data-testid="reply"]')
@@ -263,11 +262,6 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
 
     token_preview = f"{auth_token[:8]}..." if len(auth_token) >= 8 else auth_token
 
-    # Slight human-like stagger between account startups (1-2 seconds)
-    stagger_delay = (index - 1) * 1.5
-    if stagger_delay > 0:
-        await asyncio.sleep(stagger_delay)
-
     context = None
     try:
         context = await browser.new_context(
@@ -276,7 +270,12 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
             permissions=["microphone"]
         )
 
-        # Set cookies for both x.com and twitter.com
+        # Optimization: Block heavy media images & fonts to save RAM in Docker/Render
+        await context.route(
+            "**/*.{png,jpg,jpeg,webp,svg,gif,woff,woff2,ttf,otf}",
+            lambda route: route.abort()
+        )
+
         cookies = [
             {
                 "name": "auth_token",
@@ -332,7 +331,6 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
             await context.close()
             return False
 
-        # Let dynamic page content hydrate
         await asyncio.sleep(5)
         await dismiss_popups(page)
 
@@ -346,7 +344,6 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
 
         account_success = True
 
-        # Perform Space listening if mode is 3 or 4
         if mode in (3, 4):
             joined = await join_space_as_listener(page, index, token_preview)
             if joined:
@@ -355,36 +352,30 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
                 print(f"[?] [Account #{index} | {token_preview}] Space button not clicked.")
                 account_success = False
 
-        # Perform Like if mode is 1, 2, or 4
         if mode in (1, 2, 4):
             await dismiss_popups(page)
             liked = await perform_like(page, index, token_preview)
             if not liked:
                 account_success = False
 
-        # Perform Comment if mode is 2 or 4
         if mode in (2, 4):
             await dismiss_popups(page)
             commented = await perform_comment(page, comment_text, index, token_preview)
             if not commented:
                 account_success = False
 
-        # Save debug screenshot for verification
         screenshot_path = os.path.join(DEBUG_DIR, f"account_{index}_result.png")
         try:
             await page.screenshot(path=screenshot_path)
-            print(f"[*] [Account #{index} | {token_preview}] Saved screenshot to: debug_screenshots/account_{index}_result.png")
         except Exception:
             pass
 
-        # If mode was only Like or Like & Comment (modes 1 or 2), the job is done
         if mode in (1, 2):
             print(f"[OK] [Account #{index} | {token_preview}] All requested actions completed.")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             await context.close()
             return account_success
 
-        # If mode was Space listener (modes 3 or 4), keep session alive
         if mode in (3, 4):
             print(f"[+] [Account #{index} | {token_preview}] Session active. Keeping presence alive...")
             while True:
@@ -400,11 +391,6 @@ async def run_account_session(browser, token_entry, target_url, mode, comment_te
         return False
 
 def parse_cli_args():
-    """
-    Parses CLI arguments if provided:
-    python space_listener_browser_bot.py [MODE] [URL] [COMMENT]
-    Or flags: --mode, --url, --comment
-    """
     mode = None
     url = None
     comment = None
@@ -443,7 +429,6 @@ def parse_cli_args():
     return mode, url, comment
 
 def interactive_menu():
-    """Interactive CLI menu to choose action, enter URL, and custom comment."""
     print("=" * 65)
     print("            X (TWITTER) MULTI-ACCOUNT ENGAGEMENT SUITE")
     print("=" * 65)
@@ -530,6 +515,12 @@ async def main():
             ]
         )
 
+        # For Like/Comment, run with concurrency 2 to avoid memory spikes in 512MB RAM
+        sem = asyncio.Semaphore(2)
+        async def sem_run(tok, comment, idx):
+            async with sem:
+                return await run_account_session(browser, tok, target_url, mode, comment, idx)
+
         tasks = []
         for i, token in enumerate(tokens, 1):
             if custom_comment:
@@ -537,9 +528,7 @@ async def main():
             else:
                 comment_for_account = file_comments[(i - 1) % len(file_comments)]
 
-            tasks.append(
-                run_account_session(browser, token, target_url, mode, comment_for_account, i)
-            )
+            tasks.append(sem_run(token, comment_for_account, i))
 
         print(f"[*] All {len(tokens)} account tasks dispatched. Working...\n")
         

@@ -264,6 +264,11 @@ async def run_engagement_task(chat_id, bot, mode, target_url, custom_comment=Non
                 ]
             )
 
+            sem = asyncio.Semaphore(2)
+            async def sem_run(tok, comment, idx):
+                async with sem:
+                    return await bot_engine.run_account_session(browser, tok, target_url, mode, comment, idx)
+
             tasks = []
             for i, token in enumerate(tokens, 1):
                 if custom_comment:
@@ -271,9 +276,7 @@ async def run_engagement_task(chat_id, bot, mode, target_url, custom_comment=Non
                 else:
                     comment_text = file_comments[(i - 1) % len(file_comments)]
 
-                tasks.append(
-                    bot_engine.run_account_session(browser, token, target_url, mode, comment_text, i)
-                )
+                tasks.append(sem_run(token, comment_text, i))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
             await browser.close()
